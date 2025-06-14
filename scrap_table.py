@@ -2,157 +2,171 @@ import json
 import boto3
 import uuid
 from datetime import datetime
+import requests
+from bs4 import BeautifulSoup
 import time
-
-# Para usar en Lambda, necesitarás selenium y chromedriver
-try:
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from selenium.webdriver.chrome.options import Options
-    SELENIUM_AVAILABLE = True
-except ImportError:
-    SELENIUM_AVAILABLE = False
+import re
 
 def lambda_handler(event, context):
-    if not SELENIUM_AVAILABLE:
-        return {
-            'statusCode': 500,
-            'body': json.dumps({
-                'error': 'Selenium no está disponible. Instala selenium y chromedriver.',
-                'solucion': 'pip install selenium'
-            })
-        }
+    """
+    Función Lambda para scraping de datos sísmicos del IGP
+    usando requests + BeautifulSoup en lugar de Selenium
+    """
     
+    # URL del IGP
     url = "https://ultimosismo.igp.gob.pe/ultimo-sismo/sismos-reportados"
     
-    # Configurar Chrome para Lambda (headless)
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920x1080")
-    chrome_options.add_argument("--single-process")
-    chrome_options.add_argument("--disable-dev-tools")
-    chrome_options.add_argument("--no-zygote")
+    # Headers para simular un navegador real
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'es-ES,es;q=0.8,en-US;q=0.5,en;q=0.3',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    }
     
-    driver = None
+    sismos_data = []
+    
     try:
-        # Inicializar el driver
-        driver = webdriver.Chrome(options=chrome_options)
-        driver.set_page_load_timeout(30)
+        # Realizar petición HTTP
+        session = requests.Session()
+        response = session.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
         
-        # Cargar la página
-        driver.get(url)
+        # Parsear el HTML
+        soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Esperar a que se cargue el contenido dinámico
-        wait = WebDriverWait(driver, 20)
+        # Buscar tablas de sismos
+        tables = soup.find_all('table')
         
-        # Buscar diferentes selectores posibles para la tabla de sismos
-        sismos_data = []
-        
-        try:
-            # Esperar a que aparezcan elementos con datos de sismos
-            # Probar diferentes selectores
-            selectors_to_try = [
-                "//table",
-                "//div[contains(@class, 'table')]",
-                "//div[contains(@class, 'sismo')]",
-                "//tr[contains(., 'magnitud') or contains(., 'Magnitud')]",
-                "//div[contains(text(), 'Magnitud') or contains(text(), 'magnitud')]",
-                "//*[contains(text(), 'M ') or contains(text(), 'ML')]"
-            ]
+        if tables:
+            # Procesar la primera tabla encontrada
+            table = tables[0]
+            rows = table.find_all('tr')
             
-            element_found = False
-            for selector in selectors_to_try:
-                try:
-                    elements = wait.until(EC.presence_of_all_elements_located((By.XPATH, selector)))
-                    if elements:
-                        print(f"Encontrados {len(elements)} elementos con selector: {selector}")
-                        element_found = True
-                        break
-                except:
-                    continue
+            # Extraer encabezados
+            headers_row = rows[0] if rows else None
+            headers = []
             
-            if not element_found:
-                # Si no encuentra elementos específicos, esperar un tiempo y capturar todo
-                time.sleep(10)
+            if headers_row:
+                header_cells = headers_row.find_all(['th', 'td'])
+                headers = [cell.get_text(strip=True) for cell in header_cells]
             
-            # Obtener el HTML completo después de que JavaScript haya cargado
-            page_source = driver.page_source
+            # Si no hay headers, usar valores por defecto
+            if not headers:
+                headers = ['Fecha', 'Hora', 'Latitud', 'Longitud', 'Profundidad', 'Magnitud', 'Ubicación']
             
-            # Si hay una tabla visible, extraer datos
-            tables = driver.find_elements(By.TAG_NAME, "table")
+            # Procesar filas de datos
+            data_rows = rows[1:] if len(rows) > 1 else rows
             
-            if tables:
-                table = tables[0]  # Tomar la primera tabla
-                rows = table.find_elements(By.TAG_NAME, "tr")
+            for i, row in enumerate(data_rows[:10]):  # Limitar a 10 sismos
+                cells = row.find_all(['td', 'th'])
                 
-                # Extraer encabezados
-                if rows:
-                    header_cells = rows[0].find_elements(By.TAG_NAME, "th")
-                    if not header_cells:
-                        header_cells = rows[0].find_elements(By.TAG_NAME, "td")
+                if cells and len(cells) >= 3:  # Verificar que tenga datos suficientes
+                    sismo = {
+                        'id': str(uuid.uuid4()),
+                        'numero': i + 1,
+                        'fecha_scraping': datetime.now().isoformat(),
+                        'fuente': 'IGP',
+                        'url_origen': url
+                    }
                     
-                    headers = [cell.text.strip() for cell in header_cells]
-                    if not headers:
-                        headers = ['Fecha', 'Hora', 'Latitud', 'Longitud', 'Profundidad', 'Magnitud', 'Ubicación']
-                
-                # Extraer datos de filas
-                for i, row in enumerate(rows[1:11]):  # Primeros 10 sismos
-                    cells = row.find_elements(By.TAG_NAME, "td")
-                    if cells and len(cells) >= 3:  # Asegurar que tenga datos
-                        sismo = {
-                            'id': str(uuid.uuid4()),
-                            'numero': i + 1,
-                            'fecha_scraping': datetime.now().isoformat()
-                        }
-                        
-                        for j, cell in enumerate(cells):
-                            header_name = headers[j] if j < len(headers) else f'campo_{j}'
-                            sismo[header_name] = cell.text.strip()
-                        
-                        sismos_data.append(sismo)
+                    # Mapear datos a headers
+                    for j, cell in enumerate(cells):
+                        header_name = headers[j] if j < len(headers) else f'campo_{j}'
+                        cell_text = cell.get_text(strip=True)
+                        sismo[header_name] = cell_text
+                    
+                    sismos_data.append(sismo)
+        
+        # Si no se encontraron tablas, buscar otros patrones
+        if not sismos_data:
+            # Buscar divs o elementos que contengan información sísmica
+            sismo_elements = soup.find_all(text=re.compile(r'M\s*\d+\.\d+|magnitud|Magnitud'))
             
-            # Si no hay tabla, buscar patrones alternativos
-            if not sismos_data:
-                # Buscar divs o elementos que contengan información de sismos
-                sismo_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'M ') or contains(text(), 'ML') or contains(text(), 'magnitud')]")
-                
-                for i, element in enumerate(sismo_elements[:10]):
+            for i, element in enumerate(sismo_elements[:5]):
+                parent = element.parent
+                if parent:
                     sismos_data.append({
                         'id': str(uuid.uuid4()),
                         'numero': i + 1,
-                        'texto_completo': element.text.strip(),
+                        'texto_encontrado': str(element).strip(),
+                        'contexto': parent.get_text(strip=True)[:200],
                         'fecha_scraping': datetime.now().isoformat(),
-                        'tag_name': element.tag_name,
-                        'html_content': element.get_attribute('innerHTML')[:200]
+                        'fuente': 'IGP_texto',
+                        'url_origen': url
                     })
-            
-            # Si aún no hay datos, capturar información general
-            if not sismos_data:
-                body_text = driver.find_element(By.TAG_NAME, "body").text
-                sismos_data.append({
-                    'id': str(uuid.uuid4()),
-                    'numero': 1,
-                    'estado': 'Sin datos específicos encontrados',
-                    'contenido_pagina': body_text[:500],
-                    'fecha_scraping': datetime.now().isoformat()
-                })
         
-        except Exception as e:
+        # Si aún no hay datos, intentar buscar la API o endpoints JSON
+        if not sismos_data:
+            # Intentar buscar llamadas AJAX o APIs
+            try:
+                # Algunas páginas del IGP pueden tener endpoints JSON
+                api_urls = [
+                    "https://ultimosismo.igp.gob.pe/api/ultimo-sismo/sismos-reportados",
+                    "https://ultimosismo.igp.gob.pe/ultimo-sismo/api/sismos",
+                    "https://ultimosismo.igp.gob.pe/ultimo-sismo/data/sismos.json"
+                ]
+                
+                for api_url in api_urls:
+                    try:
+                        api_response = session.get(api_url, headers=headers, timeout=10)
+                        if api_response.status_code == 200:
+                            data = api_response.json()
+                            if isinstance(data, list) and data:
+                                for i, sismo in enumerate(data[:10]):
+                                    sismo_record = {
+                                        'id': str(uuid.uuid4()),
+                                        'numero': i + 1,
+                                        'fecha_scraping': datetime.now().isoformat(),
+                                        'fuente': 'IGP_API',
+                                        'url_origen': api_url
+                                    }
+                                    sismo_record.update(sismo)
+                                    sismos_data.append(sismo_record)
+                                break
+                    except:
+                        continue
+            except:
+                pass
+        
+        # Si no hay datos, registrar el intento
+        if not sismos_data:
             sismos_data.append({
                 'id': str(uuid.uuid4()),
-                'error': f'Error al extraer datos: {str(e)}',
-                'fecha_scraping': datetime.now().isoformat()
+                'numero': 1,
+                'estado': 'No se encontraron datos sísmicos',
+                'html_title': soup.title.string if soup.title else 'Sin título',
+                'respuesta_status': response.status_code,
+                'fecha_scraping': datetime.now().isoformat(),
+                'fuente': 'IGP_fallback',
+                'url_origen': url
             })
-        
-        # Guardar en DynamoDB
+    
+    except requests.exceptions.RequestException as e:
+        sismos_data.append({
+            'id': str(uuid.uuid4()),
+            'error': f'Error de conexión: {str(e)}',
+            'fecha_scraping': datetime.now().isoformat(),
+            'tipo_error': 'RequestException'
+        })
+    
+    except Exception as e:
+        sismos_data.append({
+            'id': str(uuid.uuid4()),
+            'error': f'Error general: {str(e)}',
+            'fecha_scraping': datetime.now().isoformat(),
+            'tipo_error': type(e).__name__
+        })
+    
+    # Guardar en DynamoDB
+    try:
         if sismos_data:
             dynamodb = boto3.resource('dynamodb')
-            tabla = dynamodb.Table('TablaSismosIGP')
+            
+            # Usar el nombre correcto de la tabla según tu serverless.yml
+            tabla = dynamodb.Table('TablaWebScrapping')  # Cambié de TablaSismosIGP
             
             # Limpiar registros anteriores
             try:
@@ -169,25 +183,28 @@ def lambda_handler(event, context):
                     tabla.put_item(Item=sismo)
                 except Exception as e:
                     print(f"Error al insertar: {e}")
-        
-        return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'mensaje': f'Procesados {len(sismos_data)} registros',
-                'sismos': sismos_data,
-                'total': len(sismos_data)
-            }, ensure_ascii=False)
-        }
-        
+    
     except Exception as e:
         return {
             'statusCode': 500,
             'body': json.dumps({
-                'error': f'Error general: {str(e)}',
-                'tipo': type(e).__name__
+                'error': f'Error con DynamoDB: {str(e)}',
+                'datos_extraidos': len(sismos_data)
             })
         }
     
-    finally:
-        if driver:
-            driver.quit()
+    # Respuesta exitosa
+    return {
+        'statusCode': 200,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps({
+            'mensaje': f'Scraping completado. Procesados {len(sismos_data)} registros',
+            'total_registros': len(sismos_data),
+            'sismos': sismos_data[:3],  # Solo los primeros 3 para la respuesta
+            'fecha_scraping': datetime.now().isoformat(),
+            'fuente': 'IGP - Instituto Geofísico del Perú'
+        }, ensure_ascii=False)
+    }
