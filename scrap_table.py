@@ -31,14 +31,20 @@ def lambda_handler(event, context):
     chrome_options.add_argument('--single-process')
     chrome_options.add_argument('--window-size=1920x1080')
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-plugins')
+    chrome_options.add_argument('--disable-images')
+    chrome_options.add_argument('--disable-javascript')
+    chrome_options.add_argument('--disable-css')
     
-    # Para AWS Lambda, necesitas usar un binary de Chrome personalizado
-    # chrome_options.binary_location = '/opt/chrome/chrome'
-    # chrome_options.add_argument('--single-process')
+    # Configuración específica para AWS Lambda
+    chrome_options.binary_location = '/opt/chrome/chrome'
     
     try:
-        # Inicializar el driver
-        driver = webdriver.Chrome(options=chrome_options)
+        # Usar Service para especificar la ubicación del driver
+        from selenium.webdriver.chrome.service import Service
+        service = Service(executable_path='/opt/chromedriver')
+        driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(30)
         
         # Navegar a la página
