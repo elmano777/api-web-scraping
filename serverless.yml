@@ -4,18 +4,24 @@ service: api-web-scraping
 provider:
   name: aws
   runtime: python3.12
-  # Default memory size for functions (default: 1024MB)
-  memorySize: 1024
-  timeout: 30
+  memorySize: 2048  # Aumentado para Selenium
+  timeout: 60       # Aumentado para scraping dinámico
   iam:
     role: arn:aws:iam::409362080365:role/LabRole
+  environment:
+    CHROME_BINARY: /opt/chrome/chrome
+    CHROMEDRIVER_PATH: /opt/chromedriver
 
 functions:
   scrape_table:
-    handler: scrap_table.lambda_handler  # Asegúrarse de que el nombre del archivo y la función coincidan
+    handler: scrap_table.lambda_handler
+    layers:
+      # Usar una layer pública de Chrome para Lambda
+      - arn:aws:lambda:us-east-1:764866452798:layer:chrome-aws-lambda:31
+      # O crear tu propia layer
     package:
       include:
-        - ./**  # Incluir todo el contenido del directorio
+        - ./**
     events:
       - http:
           path: /scrape/table
