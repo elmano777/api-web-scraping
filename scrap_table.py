@@ -2,279 +2,236 @@ import json
 import boto3
 import uuid
 from datetime import datetime
-import time
+import requests
 import re
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from bs4 import BeautifulSoup
+import time
 
 def lambda_handler(event, context):
     """
     Función Lambda para scraping de datos sísmicos del IGP
-    usando Selenium para manejar contenido dinámico (Angular)
+    usando ScrapingBee para manejar contenido dinámico (Angular)
     """
     
-    url = "https://ultimosismo.igp.gob.pe/ultimo-sismo/sismos-reportados"
+    # Configuración de ScrapingBee
+    SCRAPINGBEE_API_KEY = "XI2EJYTI4PNGLQVKRJ6FL30GXOEZ4JIV7MGN8E6AK30CFUUQUEHXFWASE58CF80MX22AQOYZJTSBVAV7"
+    BASE_URL = "https://app.scrapingbee.com/api/v1/"
+    
+    target_url = "https://ultimosismo.igp.gob.pe/ultimo-sismo/sismos-reportados"
     sismos_data = []
     
-    # Configurar opciones de Chrome para Lambda
-    chrome_options = Options()
-    chrome_options.add_argument('--headless')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--disable-dev-tools')
-    chrome_options.add_argument('--no-zygote')
-    chrome_options.add_argument('--single-process')
-    chrome_options.add_argument('--window-size=1920x1080')
-    chrome_options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
-    chrome_options.add_argument('--disable-extensions')
-    chrome_options.add_argument('--disable-plugins')
-    chrome_options.add_argument('--disable-images')
-    chrome_options.add_argument('--disable-javascript')
-    chrome_options.add_argument('--disable-css')
-    
-    # Configuración específica para AWS Lambda
-    chrome_options.binary_location = '/opt/chrome/chrome'
-    
     try:
-        # Usar Service para especificar la ubicación del driver
-        from selenium.webdriver.chrome.service import Service
-        service = Service(executable_path='/opt/chromedriver')
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.set_page_load_timeout(30)
+        # Parámetros para ScrapingBee
+        params = {
+            'api_key': SCRAPINGBEE_API_KEY,
+            'url': target_url,
+            'render_js': 'true',  # Renderizar JavaScript (Angular)
+            'wait': 5000,  # Esperar 5 segundos para que Angular cargue
+            'wait_for': 'table',  # Esperar hasta que aparezca una tabla
+            'premium_proxy': 'true',  # Usar proxies premium
+            'country_code': 'PE',  # Usar proxy de Perú si está disponible
+            'device': 'desktop',
+            'block_ads': 'true',
+            'block_resources': 'false'  # No bloquear recursos para Angular
+        }
         
-        # Navegar a la página
-        driver.get(url)
+        # Realizar la solicitud a ScrapingBee
+        print(f"Iniciando scraping de: {target_url}")
+        response = requests.get(BASE_URL, params=params, timeout=120)
         
-        # Esperar a que la página cargue completamente
-        # Buscar indicadores de que Angular ha terminado de cargar
-        wait = WebDriverWait(driver, 20)
-        
-        # Intentar diferentes estrategias para esperar a que se carguen los datos
-        loading_strategies = [
-            # Esperar por tabla de sismos
-            (By.CSS_SELECTOR, 'table tbody tr'),
-            (By.CSS_SELECTOR, '.sismo-item'),
-            (By.CSS_SELECTOR, '[ng-repeat]'),
-            (By.CSS_SELECTOR, '.table-responsive table'),
-            (By.XPATH, "//table//tr[position()>1]"),
-            # Esperar por contenedores de datos
-            (By.CSS_SELECTOR, '.container .row'),
-            (By.CSS_SELECTOR, '[data-sismo]'),
-            (By.CSS_SELECTOR, '.sismos-container')
-        ]
-        
-        element_found = None
-        for by, selector in loading_strategies:
+        if response.status_code == 200:
+            html_content = response.text
+            
+            # Usar BeautifulSoup para parsear el HTML
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            extraction_successful = False
+            
+            # Método 1: Buscar tablas específicas de sismos
             try:
-                element_found = wait.until(EC.presence_of_element_located((by, selector)))
-                print(f"Elementos encontrados con selector: {selector}")
-                break
-            except TimeoutException:
-                continue
-        
-        # Esperar un poco más para asegurar que todo se haya cargado
-        time.sleep(3)
-        
-        # Intentar extraer datos de diferentes maneras
-        extraction_successful = False
-        
-        # Método 1: Buscar tablas
-        try:
-            tables = driver.find_elements(By.TAG_NAME, 'table')
-            if tables:
-                for table in tables:
-                    rows = table.find_elements(By.TAG_NAME, 'tr')
+                tables = soup.find_all('table')
+                print(f"Encontradas {len(tables)} tablas")
+                
+                for table_idx, table in enumerate(tables):
+                    rows = table.find_all('tr')
                     if len(rows) > 1:  # Tiene encabezados y datos
                         # Obtener encabezados
-                        header_cells = rows[0].find_elements(By.TAG_NAME, 'th')
-                        if not header_cells:
-                            header_cells = rows[0].find_elements(By.TAG_NAME, 'td')
+                        header_row = rows[0]
+                        header_cells = header_row.find_all(['th', 'td'])
+                        headers = [cell.get_text(strip=True) for cell in header_cells]
                         
-                        headers = [cell.text.strip() for cell in header_cells]
-                        if not headers:
+                        # Si no hay encabezados claros, usar valores por defecto
+                        if not headers or all(not h for h in headers):
                             headers = ['Fecha', 'Hora', 'Latitud', 'Longitud', 'Profundidad', 'Magnitud', 'Ubicación']
                         
+                        print(f"Tabla {table_idx} - Encabezados: {headers}")
+                        
                         # Procesar filas de datos
-                        for i, row in enumerate(rows[1:11]):  # Máximo 10 sismos
-                            cells = row.find_elements(By.TAG_NAME, 'td')
-                            if cells:
+                        data_rows = 0
+                        for i, row in enumerate(rows[1:]):  # Saltar encabezados
+                            if data_rows >= 10:  # Máximo 10 sismos
+                                break
+                                
+                            cells = row.find_all('td')
+                            if cells and any(cell.get_text(strip=True) for cell in cells):
                                 sismo = {
                                     'id': str(uuid.uuid4()),
-                                    'numero': i + 1,
+                                    'numero': data_rows + 1,
                                     'fecha_scraping': datetime.now().isoformat(),
-                                    'fuente': 'IGP_SELENIUM',
-                                    'url_origen': url
+                                    'fuente': 'IGP_SCRAPINGBEE',
+                                    'url_origen': target_url,
+                                    'tabla_numero': table_idx
                                 }
                                 
+                                # Mapear celdas a encabezados
                                 for j, cell in enumerate(cells):
-                                    header_name = headers[j] if j < len(headers) else f'campo_{j}'
-                                    sismo[header_name] = cell.text.strip()
+                                    cell_text = cell.get_text(strip=True)
+                                    if cell_text:  # Solo agregar si hay contenido
+                                        header_name = headers[j] if j < len(headers) else f'campo_{j}'
+                                        sismo[header_name] = cell_text
                                 
-                                sismos_data.append(sismo)
+                                # Validar que el registro tenga datos útiles
+                                if len([v for v in sismo.values() if isinstance(v, str) and v.strip()]) > 5:
+                                    sismos_data.append(sismo)
+                                    data_rows += 1
                         
                         if sismos_data:
                             extraction_successful = True
+                            print(f"Extraídos {len(sismos_data)} sismos de la tabla {table_idx}")
                             break
-        except Exception as e:
-            print(f"Error extrayendo tablas: {e}")
-        
-        # Método 2: Buscar elementos con ng-repeat o similares (Angular)
-        if not extraction_successful:
-            try:
-                angular_selectors = [
-                    '[ng-repeat*="sismo"]',
-                    '[ng-repeat*="item"]',
-                    '[ng-repeat*="data"]',
-                    '.sismo-item',
-                    '.earthquake-item',
-                    '[data-ng-repeat]'
-                ]
-                
-                for selector in angular_selectors:
-                    try:
-                        elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                            
+            except Exception as e:
+                print(f"Error extrayendo tablas: {e}")
+            
+            # Método 2: Buscar elementos específicos con clases de Angular/sismos
+            if not extraction_successful:
+                try:
+                    # Selectores comunes para datos sísmicos
+                    selectors = [
+                        '.sismo-item', '.earthquake-item', '.seismic-data',
+                        '[ng-repeat*="sismo"]', '[ng-repeat*="earthquake"]',
+                        '.sismos-container .row', '.data-row',
+                        '[data-sismo]', '[data-earthquake]'
+                    ]
+                    
+                    for selector in selectors:
+                        elements = soup.select(selector)
                         if elements:
+                            print(f"Encontrados {len(elements)} elementos con selector: {selector}")
+                            
                             for i, element in enumerate(elements[:10]):
-                                sismo = {
-                                    'id': str(uuid.uuid4()),
-                                    'numero': i + 1,
-                                    'contenido': element.text.strip(),
-                                    'fecha_scraping': datetime.now().isoformat(),
-                                    'fuente': 'IGP_SELENIUM_ANGULAR',
-                                    'url_origen': url,
-                                    'selector_usado': selector
-                                }
-                                sismos_data.append(sismo)
-                            extraction_successful = True
-                            break
-                    except Exception as e:
-                        continue
-            except Exception as e:
-                print(f"Error con selectores Angular: {e}")
-        
-        # Método 3: Ejecutar JavaScript para obtener datos directamente
-        if not extraction_successful:
-            try:
-                # Intentar obtener datos del scope de Angular
-                js_scripts = [
-                    """
-                    var scope = angular.element(document.body).scope();
-                    return scope && scope.sismos ? scope.sismos : null;
-                    """,
-                    """
-                    return window.sismos || window.data || window.seismicData || null;
-                    """,
-                    """
-                    var tables = document.querySelectorAll('table tbody tr');
-                    var data = [];
-                    for(var i = 0; i < Math.min(tables.length, 10); i++) {
-                        var cells = tables[i].querySelectorAll('td');
-                        var row = {};
-                        for(var j = 0; j < cells.length; j++) {
-                            row['campo_' + j] = cells[j].textContent.trim();
-                        }
-                        if(Object.keys(row).length > 0) data.push(row);
-                    }
-                    return data;
-                    """
-                ]
+                                text_content = element.get_text(strip=True)
+                                if text_content and len(text_content) > 10:  # Filtrar elementos vacíos
+                                    sismo = {
+                                        'id': str(uuid.uuid4()),
+                                        'numero': i + 1,
+                                        'contenido_completo': text_content,
+                                        'fecha_scraping': datetime.now().isoformat(),
+                                        'fuente': 'IGP_SCRAPINGBEE_SELECTOR',
+                                        'url_origen': target_url,
+                                        'selector_usado': selector
+                                    }
+                                    
+                                    # Intentar extraer datos específicos del texto
+                                    extract_seismic_data_from_text(text_content, sismo)
+                                    sismos_data.append(sismo)
+                            
+                            if sismos_data:
+                                extraction_successful = True
+                                break
+                                
+                except Exception as e:
+                    print(f"Error con selectores específicos: {e}")
+            
+            # Método 3: Análisis de texto completo para encontrar patrones sísmicos
+            if not extraction_successful:
+                try:
+                    # Obtener todo el texto visible
+                    all_text = soup.get_text()
+                    lines = [line.strip() for line in all_text.split('\n') if line.strip()]
+                    
+                    # Patrones para identificar datos sísmicos
+                    seismic_patterns = [
+                        r'M\s*\d+\.\d+',  # Magnitud
+                        r'\d{2}/\d{2}/\d{4}.*\d{2}:\d{2}:\d{2}',  # Fecha y hora
+                        r'profundidad.*\d+.*km',  # Profundidad
+                        r'epicentro',  # Epicentro
+                        r'lat.*\d+\.\d+.*lon.*\d+\.\d+'  # Coordenadas
+                    ]
+                    
+                    seismic_lines = []
+                    for line in lines:
+                        line_lower = line.lower()
+                        if (any(re.search(pattern, line, re.I) for pattern in seismic_patterns) or
+                            any(keyword in line_lower for keyword in ['sismo', 'earthquake', 'temblor', 'epicentro'])):
+                            seismic_lines.append(line)
+                    
+                    print(f"Encontradas {len(seismic_lines)} líneas con contenido sísmico")
+                    
+                    for i, line in enumerate(seismic_lines[:10]):
+                        if len(line) > 20:  # Filtrar líneas muy cortas
+                            sismo = {
+                                'id': str(uuid.uuid4()),
+                                'numero': i + 1,
+                                'texto_sismico': line,
+                                'fecha_scraping': datetime.now().isoformat(),
+                                'fuente': 'IGP_SCRAPINGBEE_TEXT',
+                                'url_origen': target_url
+                            }
+                            
+                            # Extraer datos específicos del texto
+                            extract_seismic_data_from_text(line, sismo)
+                            sismos_data.append(sismo)
+                    
+                    if sismos_data:
+                        extraction_successful = True
                 
-                for script in js_scripts:
-                    try:
-                        result = driver.execute_script(script)
-                        if result and isinstance(result, list):
-                            for i, item in enumerate(result[:10]):
-                                sismo = {
-                                    'id': str(uuid.uuid4()),
-                                    'numero': i + 1,
-                                    'fecha_scraping': datetime.now().isoformat(),
-                                    'fuente': 'IGP_SELENIUM_JS',
-                                    'url_origen': url
-                                }
-                                if isinstance(item, dict):
-                                    sismo.update(item)
-                                else:
-                                    sismo['datos'] = str(item)
-                                sismos_data.append(sismo)
-                            extraction_successful = True
-                            break
-                    except Exception as e:
-                        continue
-            except Exception as e:
-                print(f"Error ejecutando JavaScript: {e}")
-        
-        # Método 4: Análisis de texto completo como último recurso
-        if not extraction_successful:
-            try:
-                # Obtener todo el texto de la página y buscar patrones
-                page_text = driver.find_element(By.TAG_NAME, 'body').text
-                
-                # Buscar patrones de magnitud y datos sísmicos
-                magnitude_pattern = r'M\s*(\d+\.\d+)'
-                date_pattern = r'\d{2}/\d{2}/\d{4}'
-                time_pattern = r'\d{2}:\d{2}:\d{2}'
-                
-                lines = page_text.split('\n')
-                seismic_lines = []
-                
-                for line in lines:
-                    if (re.search(magnitude_pattern, line, re.I) or 
-                        'sismo' in line.lower() or 
-                        'epicentro' in line.lower() or
-                        'magnitud' in line.lower()):
-                        seismic_lines.append(line.strip())
-                
-                for i, line in enumerate(seismic_lines[:10]):
-                    if line:
-                        sismos_data.append({
-                            'id': str(uuid.uuid4()),
-                            'numero': i + 1,
-                            'texto_sismico': line,
-                            'fecha_scraping': datetime.now().isoformat(),
-                            'fuente': 'IGP_SELENIUM_TEXT',
-                            'url_origen': url
-                        })
-                
-                if sismos_data:
-                    extraction_successful = True
-            except Exception as e:
-                print(f"Error con análisis de texto: {e}")
-        
-        # Captura de pantalla para diagnóstico (opcional)
-        try:
-            screenshot = driver.get_screenshot_as_base64()
-            # Podrías guardar esto en S3 para diagnóstico
-        except:
-            pass
+                except Exception as e:
+                    print(f"Error con análisis de texto: {e}")
+            
+            # Información adicional de ScrapingBee
+            scrapingbee_info = {
+                'response_headers': dict(response.headers),
+                'status_code': response.status_code,
+                'content_length': len(html_content)
+            }
+            
+        else:
+            # Error en la solicitud a ScrapingBee
+            error_info = {
+                'id': str(uuid.uuid4()),
+                'error': f'Error ScrapingBee: HTTP {response.status_code}',
+                'response_text': response.text[:500],  # Primeros 500 caracteres del error
+                'fecha_scraping': datetime.now().isoformat(),
+                'tipo_error': 'ScrapingBeeHTTPError'
+            }
+            sismos_data.append(error_info)
+    
+    except requests.exceptions.Timeout:
+        sismos_data.append({
+            'id': str(uuid.uuid4()),
+            'error': 'Timeout en ScrapingBee - La página tardó demasiado en cargar',
+            'fecha_scraping': datetime.now().isoformat(),
+            'tipo_error': 'Timeout'
+        })
     
     except Exception as e:
         sismos_data.append({
             'id': str(uuid.uuid4()),
-            'error': f'Error con Selenium: {str(e)}',
+            'error': f'Error general: {str(e)}',
             'fecha_scraping': datetime.now().isoformat(),
             'tipo_error': type(e).__name__
         })
-    
-    finally:
-        try:
-            driver.quit()
-        except:
-            pass
     
     # Si no se obtuvieron datos, agregar información de diagnóstico
     if not sismos_data:
         sismos_data.append({
             'id': str(uuid.uuid4()),
             'estado': 'No se encontraron datos sísmicos',
-            'url_analizada': url,
+            'url_analizada': target_url,
             'fecha_scraping': datetime.now().isoformat(),
             'tipo_error': 'SinDatos',
-            'sugerencia': 'La página podría estar usando un framework JS diferente o los selectores han cambiado'
+            'sugerencia': 'La página podría haber cambiado su estructura o no contener datos en el momento del scraping'
         })
     
     # Guardar en DynamoDB
@@ -289,15 +246,20 @@ def lambda_handler(event, context):
                 with tabla.batch_writer() as batch:
                     for item in scan['Items']:
                         batch.delete_item(Key={'id': item['id']})
+                print(f"Tabla limpiada: {len(scan.get('Items', []))} registros eliminados")
             except Exception as e:
                 print(f"Error al limpiar tabla: {e}")
             
             # Insertar nuevos datos
+            inserted_count = 0
             for sismo in sismos_data:
                 try:
                     tabla.put_item(Item=sismo)
+                    inserted_count += 1
                 except Exception as e:
-                    print(f"Error al insertar: {e}")
+                    print(f"Error al insertar registro: {e}")
+            
+            print(f"Insertados {inserted_count} registros en DynamoDB")
     
     except Exception as e:
         return {
@@ -315,10 +277,49 @@ def lambda_handler(event, context):
             'Access-Control-Allow-Origin': '*'
         },
         'body': json.dumps({
-            'mensaje': f'Scraping completado. Procesados {len(sismos_data)} registros',
+            'mensaje': f'Scraping completado con ScrapingBee. Procesados {len(sismos_data)} registros',
             'total_registros': len(sismos_data),
-            'sismos': sismos_data[:3],
+            'sismos': sismos_data[:3] if len(sismos_data) > 3 else sismos_data,
             'fecha_scraping': datetime.now().isoformat(),
-            'fuente': 'IGP - Instituto Geofísico del Perú'
+            'fuente': 'IGP - Instituto Geofísico del Perú',
+            'metodo': 'ScrapingBee API'
         }, ensure_ascii=False)
     }
+
+def extract_seismic_data_from_text(text, sismo_dict):
+    """
+    Extrae datos sísmicos específicos de un texto usando expresiones regulares
+    """
+    try:
+        # Patrones para extraer datos específicos
+        patterns = {
+            'magnitud': r'M\s*(\d+\.\d+)',
+            'fecha': r'(\d{1,2}/\d{1,2}/\d{4})',
+            'hora': r'(\d{1,2}:\d{2}:\d{2})',
+            'profundidad': r'(\d+(?:\.\d+)?)\s*km',
+            'latitud': r'lat[^0-9-]*(-?\d+\.\d+)',
+            'longitud': r'lon[^0-9-]*(-?\d+\.\d+)'
+        }
+        
+        for key, pattern in patterns.items():
+            match = re.search(pattern, text, re.I)
+            if match:
+                sismo_dict[key] = match.group(1)
+        
+        # Buscar ubicación (texto después de coordenadas o al final)
+        location_patterns = [
+            r'(?:ubicación|location|lugar)[:\s]*([^0-9\n]+?)(?:\d|$)',
+            r'(?:lat.*?lon.*?)([A-Za-z][^0-9\n]+?)(?:\d|$)',
+            r'([A-Z][^0-9\n]{10,}?)(?:\d|$)'
+        ]
+        
+        for pattern in location_patterns:
+            match = re.search(pattern, text, re.I)
+            if match:
+                location = match.group(1).strip()
+                if len(location) > 5:  # Filtrar ubicaciones muy cortas
+                    sismo_dict['ubicacion'] = location
+                    break
+                    
+    except Exception as e:
+        print(f"Error extrayendo datos del texto: {e}")
