@@ -4,20 +4,16 @@ service: api-web-scraping
 provider:
   name: aws
   runtime: python3.12
-  memorySize: 2048  # Aumentado para Selenium
-  timeout: 60       # Aumentado para scraping dinámico
+  memorySize: 1024     # Reducido ya que no necesitamos tanto como con Selenium
+  timeout: 120        # Aumentado para dar tiempo a ScrapingBee
   iam:
     role: arn:aws:iam::409362080365:role/LabRole
   environment:
-    CHROME_BINARY: /opt/chrome/chrome
-    CHROMEDRIVER_PATH: /opt/chromedriver
+    SCRAPINGBEE_API_KEY: XI2EJYTI4PNGLQVKRJ6FL30GXOEZ4JIV7MGN8E6AK30CFUUQUEHXFWASE58CF80MX22AQOYZJTSBVAV7
 
 functions:
   scrape_table:
     handler: scrap_table.lambda_handler
-    layers:
-      # Layer de Chrome para AWS Lambda (ajusta la versión según tu región)
-      - arn:aws:lambda:us-east-1:764866452798:layer:chrome-aws-lambda:31
     package:
       include:
         - ./**
